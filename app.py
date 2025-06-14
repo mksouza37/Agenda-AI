@@ -6,6 +6,7 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 import os
 from datetime import datetime, timedelta
+import json
 
 # Load env vars
 load_dotenv()
@@ -26,7 +27,7 @@ class CalendarToolkit:
         self.calendar_id = calendar_id
 
     def get_tools(self):
-        """Return a test booking tool"""
+        """Return a test bgit add app.pyooking tool"""
         return [self.create_test_booking]
 
     def create_test_booking(self, event_summary="Test Booking", minutes_from_now=30, duration_minutes=60):
