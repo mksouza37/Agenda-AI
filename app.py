@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import os
 import json
 import re
-from typing import Dict, Any
+from typing import Dict, Any, List
 from pydantic import Field
 from datetime import datetime, timedelta
 
@@ -52,9 +52,12 @@ class GoogleCalendarTool(BaseTool):
                                 second=0)
         return date
 
-    def _run(self, comando: Dict[str, Any]) -> str:
+    def _run(self, context: List[str]) -> str:
         """Processa comandos em português"""
-        mensagem = comando.get('mensagem', '').lower()
+        if not context or not isinstance(context, list):
+            return "❌ Mensagem inválida recebida"
+
+        mensagem = context[0].lower()
 
         if any(word in mensagem for word in ["cancelar", "remover"]):
             return self._cancelar_evento(mensagem)
@@ -164,7 +167,7 @@ def whatsapp_webhook():
             description=f"Processar mensagem: {incoming_msg}",
             expected_output="Confirmação de agendamento/cancelamento",
             agent=booking_agent,
-            context={"mensagem": incoming_msg}  # Passa a mensagem original
+            context=[incoming_msg]  # Passa a mensagem como lista
         )
 
         crew = Crew(
