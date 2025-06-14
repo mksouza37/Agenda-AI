@@ -1,105 +1,125 @@
 from flask import Flask, request, jsonify
-from crewai import Agent, Task, Crew, Tool
+from crewai import Agent, Task, Crew
+from crewai_tools import BaseTool
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from twilio.rest import Client
 from dotenv import load_dotenv
 import os
-from datetime import datetime, timedelta
 import json
+from typing import Dict, Any
 
-# Load env vars
+# Load environment variables
 load_dotenv()
 
-# Custom Google Calendar Toolkit Implementation
-class CalendarToolkit:
-    def __init__(self, calendar_id):
+
+class GoogleCalendarTool(BaseTool):
+    """Custom tool for Google Calendar operations"""
+
+    def __init__(self, calendar_id: str):
+        super().__init__()
+        self.calendar_id = calendar_id
+        self._setup_calendar_service()
+
+    def _setup_calendar_service(self):
+        """Initialize Google Calendar service"""
         credential_content = os.getenv('GOOGLE_CREDENTIALS')
         if not credential_content:
-            raise ValueError("Google credentials not found")
+            raise ValueError("Google credentials not found in environment variables")
 
         self.creds = service_account.Credentials.from_service_account_info(
-            json.loads(credential_content)
+            json.loads(credential_content))
         self.service = build('calendar', 'v3', credentials=self.creds)
-        self.calendar_id = calendar_id
 
-    def create_booking(self, event_summary, start_time, end_time):
-        """Actual method to create calendar events"""
+    def _run(self, event_details: Dict[str, Any]) -> str:
+        """Create calendar event (Core tool functionality)"""
         event = {
-            'summary': event_summary,
-            'start': {'dateTime': start_time},
-            'end': {'dateTime': end_time},
+            'summary': event_details.get('summary'),
+            'start': {'dateTime': event_details.get('start_time')},
+            'end': {'dateTime': event_details.get('end_time')},
+            'description': event_details.get('description', '')
         }
+
         created_event = self.service.events().insert(
             calendarId=self.calendar_id,
             body=event
         ).execute()
-        return f"Created event: {created_event.get('htmlLink')}"
 
-    def get_tools(self):
-        """Return properly formatted CrewAI tools"""
-        return [
-            Tool(
-                name="google_calendar_creator",
-                func=self.create_booking,
-                description="Creates events in Google Calendar. Input should be event_summary, start_time (ISO format), end_time (ISO format)"
-            )
-        ]
+        return f"Event created: {created_event.get('htmlLink')}"
 
-# Initialize clients
-twilio_client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
-toolkit = CalendarToolkit(
-    calendar_id=os.getenv("GOOGLE_CALENDAR_ID")
-)
 
-# CrewAI Agent Setup
-booking_agent = Agent(
-    role="WhatsApp Booking Assistant",
-    goal="Handle appointment bookings via WhatsApp",
-    backstory="Specialized in calendar management",
-    tools=toolkit.get_tools(),  # Now returns proper Tool objects
-    verbose=True
-)
+def initialize_services() -> tuple:
+    """Initialize all required services"""
+    twilio_client = Client(
+        os.getenv('TWILIO_ACCOUNT_SID'),
+        os.getenv('TWILIO_AUTH_TOKEN')
+    )
+
+    calendar_tool = GoogleCalendarTool(
+        calendar_id=os.getenv("GOOGLE_CALENDAR_ID")
+    )
+
+    booking_agent = Agent(
+        role="WhatsApp Booking Assistant",
+        goal="Handle appointment bookings via WhatsApp messages",
+        backstory=(
+            "Specialized in parsing natural language requests "
+            "and managing calendars with precision"
+        ),
+        tools=[calendar_tool],
+        verbose=True
+    )
+
+    return twilio_client, booking_agent
+
+
+def format_whatsapp_number(number: str) -> str:
+    """Standardize WhatsApp number format"""
+    if number.startswith('whatsapp:+'):
+        return number
+    return f"whatsapp:+{number.lstrip('whatsapp:').lstrip('+')}"
+
+
+# Initialize Flask app and services
 app = Flask(__name__)
-
-
-def format_whatsapp_number(number):
-    """Convert WhatsApp numbers to E.164 format"""
-    return number if number.startswith('whatsapp:+') else f"whatsapp:+{number.lstrip('whatsapp:')}"
+twilio_client, booking_agent = initialize_services()
 
 
 @app.route('/whatsapp', methods=['POST'])
 def whatsapp_webhook():
+    """Handle incoming WhatsApp messages"""
     try:
-        # Get incoming message
         incoming_msg = request.values.get('Body', '').strip()
         sender = format_whatsapp_number(request.values.get('From', ''))
 
         if not incoming_msg:
             return jsonify({"error": "Empty message"}), 400
 
-        # Create CrewAI task
         task = Task(
-            description=f"Process test booking request: '{incoming_msg}'",
-            expected_output="Confirmation of test booking creation",
+            description=(
+                f"Process booking request: '{incoming_msg}'. "
+                "Extract: (1) Event summary, (2) Start datetime, "
+                "(3) End datetime, (4) Optional description"
+            ),
+            expected_output="Confirmation message with event details",
             agent=booking_agent
         )
 
         crew = Crew(agents=[booking_agent], tasks=[task])
         result = crew.kickoff()
 
-        # Send response via Twilio
         twilio_client.messages.create(
             body=result,
             from_=os.getenv('TWILIO_WHATSAPP_NUMBER'),
             to=sender
         )
+
         return jsonify({"success": True})
 
     except Exception as e:
-        # Error fallback
+        error_msg = "⚠️ Sorry, something went wrong. Please try again later."
         twilio_client.messages.create(
-            body="⚠️ Sorry, something went wrong. Please try again later.",
+            body=error_msg,
             from_=os.getenv('TWILIO_WHATSAPP_NUMBER'),
             to=sender
         )
