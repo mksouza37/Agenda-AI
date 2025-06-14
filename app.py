@@ -9,6 +9,8 @@ import os
 import json
 from typing import Dict, Any
 from pydantic import Field
+from datetime import datetime, timedelta
+import dateutil.parser
 
 # Load environment variables
 load_dotenv()
@@ -38,18 +40,34 @@ class GoogleCalendarTool(BaseTool):
         self.service = build('calendar', 'v3', credentials=creds)
 
     def _run(self, event_details: Dict[str, Any]) -> str:
-        """Create calendar event (Core tool functionality)"""
-        event = {
-            'summary': event_details.get('summary'),
-            'start': {'dateTime': event_details.get('start_time')},
-            'end': {'dateTime': event_details.get('end_time')}
-        }
-        result = self.service.events().insert(
-            calendarId=self.calendar_id,
-            body=event
-        ).execute()
-        return f"Event created: {result.get('htmlLink')}"
+        """Create calendar event with proper time formatting"""
+        try:
+            # Parse natural language time (example for "tomorrow at 2pm")
+            start_time = datetime.now() + timedelta(days=1)
+            start_time = start_time.replace(hour=14, minute=0, second=0)
+            end_time = start_time + timedelta(hours=1)
 
+            event = {
+                'summary': event_details.get('summary', 'Meeting'),
+                'start': {
+                    'dateTime': start_time.isoformat(),
+                    'timeZone': 'America/Sao_Paulo'  # Adjust to your timezone
+                },
+                'end': {
+                    'dateTime': end_time.isoformat(),
+                    'timeZone': 'America/Sao_Paulo'
+                }
+            }
+
+            created_event = self.service.events().insert(
+                calendarId=self.calendar_id,
+                body=event
+            ).execute()
+
+            return f"✅ Reunião agendada: {created_event.get('htmlLink')}"
+
+        except Exception as e:
+            return f"❌ Erro ao agendar: {str(e)}"
 
 # Initialize services
 twilio_client = Client(
