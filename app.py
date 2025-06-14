@@ -13,8 +13,15 @@ load_dotenv()
 
 # Custom Google Calendar Toolkit Implementation
 class CalendarToolkit:
-    def __init__(self, credentials_path, calendar_id):
-        self.creds = service_account.Credentials.from_service_account_file(credentials_path)
+    def __init__(self, calendar_id):
+        # Get credentials from environment variable
+        credential_content = os.getenv('GOOGLE_CREDENTIALS')
+        if not credential_content:
+            raise ValueError("Google credentials not found in environment variables")
+
+        self.creds = service_account.Credentials.from_service_account_info(
+            json.loads(credential_content)
+        )
         self.service = build('calendar', 'v3', credentials=self.creds)
         self.calendar_id = calendar_id
 
@@ -46,7 +53,6 @@ class CalendarToolkit:
 # Initialize clients
 twilio_client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
 toolkit = CalendarToolkit(
-    credentials_path="credentials.json",
     calendar_id=os.getenv("GOOGLE_CALENDAR_ID")
 )
 
