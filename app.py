@@ -75,7 +75,7 @@ def format_whatsapp_number(number: str) -> str:
     return number if number.startswith('whatsapp:+') else f"whatsapp:+{number.lstrip('+')}"
 
 
-@app.route('/whatsapp', methods=['POST'])
+@app.route('/whatsapp-webhook', methods=['POST'])
 def whatsapp_webhook():
     try:
         incoming_msg = request.values.get('Body', '').strip()
