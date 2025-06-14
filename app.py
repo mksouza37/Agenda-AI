@@ -7,67 +7,125 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 import os
 import json
+import re
 from typing import Dict, Any
 from pydantic import Field
 from datetime import datetime, timedelta
-import dateutil.parser
 
 # Load environment variables
 load_dotenv()
 
 
-from pydantic import Field
-
 class GoogleCalendarTool(BaseTool):
-    """Custom tool for Google Calendar operations"""
-    name: str = "Google Calendar Tool"  # Required by BaseTool
-    description: str = "Creates events in Google Calendar"  # Required by BaseTool
+    """Ferramenta para agendamento no Google Calendar"""
+    name: str = "Agendador de Reuniões"
+    description: str = "Agenda e cancela eventos no Google Calendar"
     calendar_id: str = Field(default_factory=lambda: os.getenv("GOOGLE_CALENDAR_ID"))
-    service: Any = Field(default=None, exclude=True)  # Mark as non-serializable
+    service: Any = Field(default=None, exclude=True)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._setup_service()
 
     def _setup_service(self):
-        """Initialize Google Calendar service"""
+        """Configura o serviço do Google Calendar"""
         credential_content = os.getenv('GOOGLE_CREDENTIALS')
         if not credential_content:
-            raise ValueError("Google credentials not found")
+            raise ValueError("Credenciais do Google não encontradas")
 
         creds = service_account.Credentials.from_service_account_info(
             json.loads(credential_content))
         self.service = build('calendar', 'v3', credentials=creds)
 
-    def _run(self, event_details: Dict[str, Any]) -> str:
-        """Create calendar event with proper time formatting"""
-        try:
-            # Parse natural language time (example for "tomorrow at 2pm")
-            start_time = datetime.now() + timedelta(days=1)
-            start_time = start_time.replace(hour=14, minute=0, second=0)
-            end_time = start_time + timedelta(hours=1)
+    def _parse_time(self, time_str: str) -> datetime:
+        """Converte texto para objeto datetime"""
+        time_str = time_str.lower()
+        if "amanhã" in time_str:
+            date = datetime.now() + timedelta(days=1)
+        else:
+            date = datetime.now()
 
-            event = {
-                'summary': event_details.get('summary', 'Meeting'),
+        if match := re.search(r'(\d{1,2})[h:]?(\d{0,2})', time_str):
+            hour, minute = match.groups()
+            date = date.replace(hour=int(hour),
+                                minute=int(minute) if minute else 0,
+                                second=0)
+        return date
+
+    def _run(self, comando: Dict[str, Any]) -> str:
+        """Processa comandos em português"""
+        mensagem = comando.get('mensagem', '').lower()
+
+        if any(word in mensagem for word in ["cancelar", "remover"]):
+            return self._cancelar_evento(mensagem)
+        return self._agendar_evento(mensagem)
+
+    def _agendar_evento(self, mensagem: str) -> str:
+        """Agenda um novo evento"""
+        try:
+            # Extrai detalhes da mensagem
+            tema = re.search(r'tema[: ]?(.+)', mensagem, re.IGNORECASE)
+            tema = tema.group(1).strip() if tema else "Reunião"
+
+            hora_match = re.search(r'(\d{1,2})[h:]?(\d{0,2})', mensagem)
+            duracao_match = re.search(r'(\d+)\s*hora', mensagem)
+
+            inicio = self._parse_time(mensagem)
+            duracao = int(duracao_match.group(1)) if duracao_match else 1
+            fim = inicio + timedelta(hours=duracao)
+
+            evento = {
+                'summary': f"📅 {tema}",
                 'start': {
-                    'dateTime': start_time.isoformat(),
-                    'timeZone': 'America/Sao_Paulo'  # Adjust to your timezone
+                    'dateTime': inicio.isoformat(),
+                    'timeZone': 'America/Sao_Paulo'
                 },
                 'end': {
-                    'dateTime': end_time.isoformat(),
+                    'dateTime': fim.isoformat(),
                     'timeZone': 'America/Sao_Paulo'
                 }
             }
 
-            created_event = self.service.events().insert(
+            evento_criado = self.service.events().insert(
                 calendarId=self.calendar_id,
-                body=event
+                body=evento
             ).execute()
 
-            return f"✅ Reunião agendada: {created_event.get('htmlLink')}"
+            return (f"✅ Reunião agendada!\n"
+                    f"Assunto: {tema}\n"
+                    f"Data: {inicio.strftime('%d/%m às %H:%M')}\n"
+                    f"Link: {evento_criado.get('htmlLink')}")
 
         except Exception as e:
             return f"❌ Erro ao agendar: {str(e)}"
+
+    def _cancelar_evento(self, mensagem: str) -> str:
+        """Cancela um evento existente"""
+        try:
+            inicio = self._parse_time(mensagem)
+            fim = inicio + timedelta(hours=1)
+
+            eventos = self.service.events().list(
+                calendarId=self.calendar_id,
+                timeMin=inicio.isoformat(),
+                timeMax=fim.isoformat(),
+                singleEvents=True
+            ).execute()
+
+            if not eventos.get('items'):
+                return "⚠️ Nenhum evento encontrado para cancelar"
+
+            evento_id = eventos['items'][0]['id']
+            self.service.events().delete(
+                calendarId=self.calendar_id,
+                eventId=evento_id
+            ).execute()
+
+            return "🗑️ Evento cancelado com sucesso!"
+
+        except Exception as e:
+            return f"❌ Erro ao cancelar: {str(e)}"
+
 
 # Initialize services
 twilio_client = Client(
@@ -78,9 +136,9 @@ twilio_client = Client(
 calendar_tool = GoogleCalendarTool()
 
 booking_agent = Agent(
-    role="WhatsApp Booking Assistant",
-    goal="Handle appointment bookings via WhatsApp",
-    backstory="Specialized in calendar management",
+    role="Assistente de Agendamento",
+    goal="Agendar e cancelar reuniões via WhatsApp",
+    backstory="Especialista em gerenciamento de calendários",
     tools=[calendar_tool],
     verbose=True
 )
@@ -89,7 +147,7 @@ app = Flask(__name__)
 
 
 def format_whatsapp_number(number: str) -> str:
-    """Standardize WhatsApp number format"""
+    """Formata número para padrão WhatsApp"""
     return number if number.startswith('whatsapp:+') else f"whatsapp:+{number.lstrip('+')}"
 
 
@@ -100,12 +158,13 @@ def whatsapp_webhook():
         sender = format_whatsapp_number(request.values.get('From', ''))
 
         if not incoming_msg:
-            return jsonify({"error": "Empty message"}), 400
+            return jsonify({"error": "Mensagem vazia"}), 400
 
         task = Task(
-            description=f"Process booking: {incoming_msg}",
-            expected_output="Event confirmation",
-            agent=booking_agent
+            description=f"Processar mensagem: {incoming_msg}",
+            expected_output="Confirmação de agendamento/cancelamento",
+            agent=booking_agent,
+            context={"mensagem": incoming_msg}  # Passa a mensagem original
         )
 
         crew = Crew(
@@ -126,7 +185,7 @@ def whatsapp_webhook():
 
     except Exception as e:
         twilio_client.messages.create(
-            body="⚠️ Error: Please try again",
+            body="⚠️ Ocorreu um erro. Por favor, tente novamente.",
             from_=os.getenv('TWILIO_WHATSAPP_NUMBER'),
             to=sender
         )
