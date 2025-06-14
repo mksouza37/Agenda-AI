@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
-from crewai_tools import BaseTool
+from crewai.tools import BaseTool
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
