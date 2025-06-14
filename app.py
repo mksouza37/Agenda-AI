@@ -1,16 +1,51 @@
 from flask import Flask, request, jsonify
 from crewai import Agent, Task, Crew
-from langchain_google_community import GoogleCalendarToolkit  # Official package
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 from twilio.rest import Client
 from dotenv import load_dotenv
 import os
+from datetime import datetime, timedelta
 
 # Load env vars
 load_dotenv()
 
+
+# Custom Google Calendar Toolkit Implementation
+class CalendarToolkit:
+    def __init__(self, credentials_path, calendar_id):
+        self.creds = service_account.Credentials.from_service_account_file(credentials_path)
+        self.service = build('calendar', 'v3', credentials=self.creds)
+        self.calendar_id = calendar_id
+
+    def get_tools(self):
+        """Return a test booking tool"""
+        return [self.create_test_booking]
+
+    def create_test_booking(self, event_summary="Test Booking", minutes_from_now=30, duration_minutes=60):
+        """Test tool to create a calendar event (simplified for testing)"""
+        start_time = datetime.utcnow() + timedelta(minutes=minutes_from_now)
+        end_time = start_time + timedelta(minutes=duration_minutes)
+
+        event = {
+            'summary': event_summary,
+            'start': {'dateTime': start_time.isoformat() + 'Z'},
+            'end': {'dateTime': end_time.isoformat() + 'Z'},
+        }
+
+        try:
+            created_event = self.service.events().insert(
+                calendarId=self.calendar_id,
+                body=event
+            ).execute()
+            return f"Booking created: {created_event.get('htmlLink')}"
+        except Exception as e:
+            return f"Error creating booking: {str(e)}"
+
+
 # Initialize clients
 twilio_client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
-toolkit = GoogleCalendarToolkit(
+toolkit = CalendarToolkit(
     credentials_path="credentials.json",
     calendar_id=os.getenv("GOOGLE_CALENDAR_ID")
 )
@@ -20,7 +55,7 @@ booking_agent = Agent(
     role="WhatsApp Booking Assistant",
     goal="Handle appointment bookings via WhatsApp messages",
     backstory="Specialized in parsing natural language requests and managing calendars",
-    tools=toolkit.get_tools(),  # Auto-includes Google Calendar tools
+    tools=toolkit.get_tools(),  # Includes our test booking tool
     verbose=True
 )
 
@@ -36,7 +71,7 @@ def format_whatsapp_number(number):
 def whatsapp_webhook():
     try:
         # Get incoming message
-        incoming_msg = request.values.get('Body', '')
+        incoming_msg = request.values.get('Body', '').strip()
         sender = format_whatsapp_number(request.values.get('From', ''))
 
         if not incoming_msg:
@@ -44,10 +79,11 @@ def whatsapp_webhook():
 
         # Create CrewAI task
         task = Task(
-            description=f"Process WhatsApp booking request: '{incoming_msg}'. Extract: (1) intent (book/cancel), (2) service, (3) datetime, (4) name.",
-            expected_output="Confirmation message to send back to user",
+            description=f"Process test booking request: '{incoming_msg}'",
+            expected_output="Confirmation of test booking creation",
             agent=booking_agent
         )
+
         crew = Crew(agents=[booking_agent], tasks=[task])
         result = crew.kickoff()
 
