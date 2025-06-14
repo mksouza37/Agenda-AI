@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from crewai import Agent, Task, Crew
+from crewai import Agent, Task, Crew, Tool
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from twilio.rest import Client
@@ -11,45 +11,40 @@ import json
 # Load env vars
 load_dotenv()
 
-
 # Custom Google Calendar Toolkit Implementation
 class CalendarToolkit:
     def __init__(self, calendar_id):
-        # Get credentials from environment variable
         credential_content = os.getenv('GOOGLE_CREDENTIALS')
         if not credential_content:
-            raise ValueError("Google credentials not found in environment variables")
+            raise ValueError("Google credentials not found")
 
         self.creds = service_account.Credentials.from_service_account_info(
             json.loads(credential_content)
-        )
         self.service = build('calendar', 'v3', credentials=self.creds)
         self.calendar_id = calendar_id
 
-    def get_tools(self):
-        """Return a test bgit add app.pyooking tool"""
-        return [self.create_test_booking]
-
-    def create_test_booking(self, event_summary="Test Booking", minutes_from_now=30, duration_minutes=60):
-        """Test tool to create a calendar event (simplified for testing)"""
-        start_time = datetime.utcnow() + timedelta(minutes=minutes_from_now)
-        end_time = start_time + timedelta(minutes=duration_minutes)
-
+    def create_booking(self, event_summary, start_time, end_time):
+        """Actual method to create calendar events"""
         event = {
             'summary': event_summary,
-            'start': {'dateTime': start_time.isoformat() + 'Z'},
-            'end': {'dateTime': end_time.isoformat() + 'Z'},
+            'start': {'dateTime': start_time},
+            'end': {'dateTime': end_time},
         }
+        created_event = self.service.events().insert(
+            calendarId=self.calendar_id,
+            body=event
+        ).execute()
+        return f"Created event: {created_event.get('htmlLink')}"
 
-        try:
-            created_event = self.service.events().insert(
-                calendarId=self.calendar_id,
-                body=event
-            ).execute()
-            return f"Booking created: {created_event.get('htmlLink')}"
-        except Exception as e:
-            return f"Error creating booking: {str(e)}"
-
+    def get_tools(self):
+        """Return properly formatted CrewAI tools"""
+        return [
+            Tool(
+                name="google_calendar_creator",
+                func=self.create_booking,
+                description="Creates events in Google Calendar. Input should be event_summary, start_time (ISO format), end_time (ISO format)"
+            )
+        ]
 
 # Initialize clients
 twilio_client = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
@@ -60,12 +55,11 @@ toolkit = CalendarToolkit(
 # CrewAI Agent Setup
 booking_agent = Agent(
     role="WhatsApp Booking Assistant",
-    goal="Handle appointment bookings via WhatsApp messages",
-    backstory="Specialized in parsing natural language requests and managing calendars",
-    tools=toolkit.get_tools(),  # Includes our test booking tool
+    goal="Handle appointment bookings via WhatsApp",
+    backstory="Specialized in calendar management",
+    tools=toolkit.get_tools(),  # Now returns proper Tool objects
     verbose=True
 )
-
 app = Flask(__name__)
 
 
