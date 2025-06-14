@@ -1,93 +1,98 @@
 from flask import Flask, request, jsonify
-from crewai import Agent, Task, Crew
+from crewai import Agent, Crew, Process, Task
+from crewai.project import CrewBase, agent, crew, task
 from crewai_tools import BaseTool
+from crewai.agents.agent_builder.base_agent import BaseAgent
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from twilio.rest import Client
 from dotenv import load_dotenv
 import os
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # Load environment variables
 load_dotenv()
 
 
-class GoogleCalendarTool(BaseTool):
-    """Custom tool for Google Calendar operations"""
+@CrewBase
+class WhatsAppBookingCrew():
+    """WhatsApp Booking Crew"""
 
-    def __init__(self, calendar_id: str):
-        super().__init__()
-        self.calendar_id = calendar_id
-        self._setup_calendar_service()
+    agents: List[BaseAgent]
+    tasks: List[Task]
 
-    def _setup_calendar_service(self):
-        """Initialize Google Calendar service"""
-        credential_content = os.getenv('GOOGLE_CREDENTIALS')
-        if not credential_content:
-            raise ValueError("Google credentials not found in environment variables")
+    def __init__(self):
+        self.twilio_client = Client(
+            os.getenv('TWILIO_ACCOUNT_SID'),
+            os.getenv('TWILIO_AUTH_TOKEN')
+        )
 
-        self.creds = service_account.Credentials.from_service_account_info(
-            json.loads(credential_content))
-        self.service = build('calendar', 'v3', credentials=self.creds)
+    @agent
+    def booking_agent(self) -> Agent:
+        return Agent(
+            role='WhatsApp Booking Assistant',
+            goal='Handle appointment bookings via WhatsApp messages',
+            backstory='Specialized in parsing natural language requests and managing calendars',
+            verbose=True,
+            tools=[self.calendar_tool()]
+        )
 
-    def _run(self, event_details: Dict[str, Any]) -> str:
-        """Create calendar event (Core tool functionality)"""
-        event = {
-            'summary': event_details.get('summary'),
-            'start': {'dateTime': event_details.get('start_time')},
-            'end': {'dateTime': event_details.get('end_time')},
-            'description': event_details.get('description', '')
-        }
+    def calendar_tool(self) -> BaseTool:
+        class GoogleCalendarTool(BaseTool):
+            def __init__(self):
+                credential_content = os.getenv('GOOGLE_CREDENTIALS')
+                if not credential_content:
+                    raise ValueError("Google credentials not found")
 
-        created_event = self.service.events().insert(
-            calendarId=self.calendar_id,
-            body=event
-        ).execute()
+                creds = service_account.Credentials.from_service_account_info(
+                    json.loads(credential_content))
+                self.service = build('calendar', 'v3', credentials=creds)
+                self.calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
 
-        return f"Event created: {created_event.get('htmlLink')}"
+            def _run(self, event_details: Dict[str, Any]) -> str:
+                event = {
+                    'summary': event_details.get('summary'),
+                    'start': {'dateTime': event_details.get('start_time')},
+                    'end': {'dateTime': event_details.get('end_time')}
+                }
+                result = self.service.events().insert(
+                    calendarId=self.calendar_id,
+                    body=event
+                ).execute()
+                return f"Event created: {result.get('htmlLink')}"
+
+        return GoogleCalendarTool()
+
+    @task
+    def booking_task(self) -> Task:
+        return Task(
+            description='Process WhatsApp booking request',
+            expected_output='Confirmation message with event details',
+            agent=self.booking_agent()
+        )
+
+    @crew
+    def crew(self) -> Crew:
+        return Crew(
+            agents=self.agents,
+            tasks=self.tasks,
+            process=Process.sequential,
+            verbose=True
+        )
 
 
-def initialize_services() -> tuple:
-    """Initialize all required services"""
-    twilio_client = Client(
-        os.getenv('TWILIO_ACCOUNT_SID'),
-        os.getenv('TWILIO_AUTH_TOKEN')
-    )
-
-    calendar_tool = GoogleCalendarTool(
-        calendar_id=os.getenv("GOOGLE_CALENDAR_ID")
-    )
-
-    booking_agent = Agent(
-        role="WhatsApp Booking Assistant",
-        goal="Handle appointment bookings via WhatsApp messages",
-        backstory=(
-            "Specialized in parsing natural language requests "
-            "and managing calendars with precision"
-        ),
-        tools=[calendar_tool],
-        verbose=True
-    )
-
-    return twilio_client, booking_agent
+app = Flask(__name__)
+booking_crew = WhatsAppBookingCrew().crew()
 
 
 def format_whatsapp_number(number: str) -> str:
     """Standardize WhatsApp number format"""
-    if number.startswith('whatsapp:+'):
-        return number
-    return f"whatsapp:+{number.lstrip('whatsapp:').lstrip('+')}"
-
-
-# Initialize Flask app and services
-app = Flask(__name__)
-twilio_client, booking_agent = initialize_services()
+    return number if number.startswith('whatsapp:+') else f"whatsapp:+{number.lstrip('+')}"
 
 
 @app.route('/whatsapp', methods=['POST'])
 def whatsapp_webhook():
-    """Handle incoming WhatsApp messages"""
     try:
         incoming_msg = request.values.get('Body', '').strip()
         sender = format_whatsapp_number(request.values.get('From', ''))
@@ -95,20 +100,9 @@ def whatsapp_webhook():
         if not incoming_msg:
             return jsonify({"error": "Empty message"}), 400
 
-        task = Task(
-            description=(
-                f"Process booking request: '{incoming_msg}'. "
-                "Extract: (1) Event summary, (2) Start datetime, "
-                "(3) End datetime, (4) Optional description"
-            ),
-            expected_output="Confirmation message with event details",
-            agent=booking_agent
-        )
+        result = booking_crew.kickoff(inputs={'message': incoming_msg})
 
-        crew = Crew(agents=[booking_agent], tasks=[task])
-        result = crew.kickoff()
-
-        twilio_client.messages.create(
+        booking_crew.twilio_client.messages.create(
             body=result,
             from_=os.getenv('TWILIO_WHATSAPP_NUMBER'),
             to=sender
@@ -118,7 +112,7 @@ def whatsapp_webhook():
 
     except Exception as e:
         error_msg = "⚠️ Sorry, something went wrong. Please try again later."
-        twilio_client.messages.create(
+        booking_crew.twilio_client.messages.create(
             body=error_msg,
             from_=os.getenv('TWILIO_WHATSAPP_NUMBER'),
             to=sender
