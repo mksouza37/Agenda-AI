@@ -8,16 +8,19 @@ from dotenv import load_dotenv
 import os
 import json
 import re
+import logging
 from typing import Dict, Any, List
 from pydantic import Field
 from datetime import datetime, timedelta
-import logging
 
 # Load environment variables
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +45,7 @@ class GoogleCalendarTool(BaseTool):
             creds = service_account.Credentials.from_service_account_info(
                 json.loads(credential_content))
             self.service = build('calendar', 'v3', credentials=creds)
+            logger.info("Google Calendar service initialized successfully")
         except Exception as e:
             logger.error(f"Error setting up Google Calendar service: {str(e)}")
             raise
@@ -57,9 +61,11 @@ class GoogleCalendarTool(BaseTool):
 
             if match := re.search(r'(\d{1,2})[h:]?(\d{0,2})', time_str):
                 hour, minute = match.groups()
-                date = date.replace(hour=int(hour),
-                                    minute=int(minute) if minute else 0,
-                                    second=0)
+                date = date.replace(
+                    hour=int(hour),
+                    minute=int(minute) if minute else 0,
+                    second=0
+                )
             return date
         except Exception as e:
             logger.error(f"Error parsing time: {str(e)}")
@@ -198,8 +204,6 @@ def whatsapp_webhook():
     sender = ""
     try:
         logger.info(f"Incoming request: {request.method} {request.url}")
-        logger.debug(f"Request headers: {request.headers}")
-        logger.debug(f"Request data: {request.data}")
 
         # Get incoming data
         if request.is_json:
@@ -210,7 +214,7 @@ def whatsapp_webhook():
             incoming_msg = request.form.get('Body', '').strip()
             sender = request.form.get('From', '')
 
-        logger.info(f"Received message from {sender}: {incoming_msg}")
+        logger.info(f"Processing message from {sender}: {incoming_msg}")
 
         if not incoming_msg:
             logger.warning("Empty message received")
@@ -233,14 +237,23 @@ def whatsapp_webhook():
             agents=[booking_agent],
             tasks=[task],
             process=Process.sequential,
-            verbose=True
+            verbose=2  # Maximum verbosity
         )
 
         result = crew.kickoff()
-        logger.info(f"Crew result: {result}")
+        logger.info(f"Raw crew result (type: {type(result)}): {result}")
 
-        # Ensure result is string
-        response_text = str(result) if not isinstance(result, dict) else result.get('output', 'Operação concluída')
+        # SAFE RESULT HANDLING - handles all possible return types
+        if hasattr(result, 'output'):  # If it's an object with output attribute
+            response_text = str(result.output)
+        elif isinstance(result, dict):  # If it's a dictionary
+            response_text = str(result.get('output', result))
+        else:  # For any other type (string, etc)
+            response_text = str(result)
+
+        # Clean up response text
+        response_text = response_text.strip() or "Operação concluída"
+        logger.info(f"Final response text: {response_text}")
 
         # Send response
         twilio_client.messages.create(
@@ -253,17 +266,17 @@ def whatsapp_webhook():
 
     except Exception as e:
         error_msg = f"⚠️ Ocorreu um erro: {str(e)}"
-        logger.error(f"Error in webhook: {error_msg}")
+        logger.error(f"Webhook error: {error_msg}", exc_info=True)
 
         if sender:
             try:
                 twilio_client.messages.create(
-                    body=error_msg,
+                    body="Desculpe, ocorreu um erro. Por favor, tente novamente mais tarde.",
                     from_=os.getenv('TWILIO_WHATSAPP_NUMBER'),
                     to=sender
                 )
             except Exception as twilio_error:
-                logger.error(f"Failed to send error message via Twilio: {str(twilio_error)}")
+                logger.error(f"Failed to send error message: {str(twilio_error)}")
 
         return jsonify({"error": error_msg}), 500
 
@@ -271,4 +284,4 @@ def whatsapp_webhook():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 10000))
     logger.info(f"Starting server on port {port}")
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=os.getenv('DEBUG', 'False').lower() == 'true')
