@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from crewai import Agent, Task, Crew
-from langchain_google_calendar import GoogleCalendarToolkit
+from langchain_google_community import GoogleCalendarToolkit  # Official package
 from twilio.rest import Client
 from dotenv import load_dotenv
 import os
